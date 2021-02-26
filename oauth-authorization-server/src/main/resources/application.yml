@@ -7,9 +7,12 @@ spring:
     url: jdbc:h2:mem:testdb
 
 keycloak:
-  server:
+  custom:
     contextPath: /auth
     adminUser:
       username: fluentlab-admin
       password: 123456
-    realmImportFile: fluentlab-realm.json
+      create-admin-user-enabled: false
+    migration:
+      importProvider: singleFile
+      importLocation: keycloak-realm-config.json

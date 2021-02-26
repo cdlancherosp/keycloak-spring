@@ -1,73 +1,124 @@
 package com.globant.chatbot.auth.config;
 
-import com.globant.chatbot.auth.config.KeycloakServerProperties.AdminUser;
-import org.apache.logging.log4j.util.Strings;
+import com.globant.chatbot.auth.support.SpringBootConfigProvider;
 import org.keycloak.Config;
+import org.keycloak.exportimport.ExportImportConfig;
+import org.keycloak.exportimport.ExportImportManager;
 import org.keycloak.models.KeycloakSession;
-import org.keycloak.representations.idm.RealmRepresentation;
+import org.keycloak.models.KeycloakTransactionManager;
+import org.keycloak.services.ServicesLogger;
 import org.keycloak.services.managers.ApplianceBootstrap;
-import org.keycloak.services.managers.RealmManager;
 import org.keycloak.services.resources.KeycloakApplication;
-import org.keycloak.services.util.JsonConfigProviderFactory;
-import org.keycloak.util.JsonSerialization;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.Resource;
+import org.springframework.util.StringUtils;
+import org.springframework.web.context.support.WebApplicationContextUtils;
 
-import java.util.NoSuchElementException;
+import java.io.File;
+import java.io.IOException;
+import java.util.UUID;
+import javax.servlet.ServletContext;
+import javax.ws.rs.core.Context;
 
 public class EmbeddedKeycloakApplication extends KeycloakApplication {
 
     private static final Logger LOG = LoggerFactory.getLogger(EmbeddedKeycloakApplication.class);
-    static KeycloakServerProperties keycloakServerProperties;
+    private final KeycloakCustomProperties keycloakCustomProperties;
 
     protected void loadConfig() {
-        JsonConfigProviderFactory factory = new RegularJsonConfigProviderFactory();
-        Config.init(factory.create()
-                .orElseThrow(() -> new NoSuchElementException("No value present")));
+        Config.init(SpringBootConfigProvider.getInstance());
     }
 
-    public EmbeddedKeycloakApplication() {
-        super();
-        createMasterRealmAdminUser();
-        if (Strings.isNotEmpty(keycloakServerProperties.getRealmImportFile())) {
-            createPreConfigRealm();
+    public EmbeddedKeycloakApplication(@Context ServletContext context) {
+        this.keycloakCustomProperties = WebApplicationContextUtils.getRequiredWebApplicationContext(context).getBean(KeycloakCustomProperties.class);
+    }
+
+    @Override
+    protected ExportImportManager migrateAndBootstrap() {
+
+        ExportImportManager exportImportManager = super.migrateAndBootstrap();
+
+        tryCreateMasterRealmAdminUser();
+        tryImportRealm();
+
+        return exportImportManager;
+    }
+
+    protected void tryCreateMasterRealmAdminUser() {
+
+        if (!keycloakCustomProperties.getAdminUser().isCreateAdminUserEnabled()) {
+            LOG.warn("Skipping creation of keycloak master adminUser.");
+            return;
         }
-    }
 
-    private void createMasterRealmAdminUser() {
+        KeycloakCustomProperties.AdminUser adminUser = keycloakCustomProperties.getAdminUser();
+
+        String username = adminUser.getUsername();
+        if (StringUtils.isEmpty(username)) {
+            return;
+        }
+
         KeycloakSession session = getSessionFactory().create();
-        ApplianceBootstrap applianceBootstrap = new ApplianceBootstrap(session);
-        AdminUser admin = keycloakServerProperties.getAdminUser();
-
+        KeycloakTransactionManager transaction = session.getTransactionManager();
         try {
-            session.getTransactionManager().begin();
-            applianceBootstrap.createMasterRealmUser(admin.getUsername(), admin.getPassword());
-            session.getTransactionManager().commit();
-        } catch (Exception ex) {
-            LOG.warn("Couldn't create keycloak master admin user: {}", ex.getMessage());
-            session.getTransactionManager().rollback();
+            transaction.begin();
+
+            boolean randomPassword = false;
+            String password = adminUser.getPassword();
+            if (StringUtils.isEmpty(adminUser.getPassword())) {
+                password = UUID.randomUUID().toString();
+                randomPassword = true;
+            }
+            new ApplianceBootstrap(session).createMasterRealmUser(username, password);
+            if (randomPassword) {
+                LOG.info("Generated admin password: {}", password);
+            }
+            ServicesLogger.LOGGER.addUserSuccess(username, Config.getAdminRealm());
+
+            transaction.commit();
+        } catch (IllegalStateException e) {
+            transaction.rollback();
+            ServicesLogger.LOGGER.addUserFailedUserExists(username, Config.getAdminRealm());
+        } catch (Throwable t) {
+            transaction.rollback();
+            ServicesLogger.LOGGER.addUserFailed(t, username, Config.getAdminRealm());
+        } finally {
+            session.close();
         }
+    }
+
+    protected void tryImportRealm() {
+
+        KeycloakCustomProperties.Migration imex = keycloakCustomProperties.getMigration();
+        Resource importLocation = imex.getImportLocation();
+
+        if (!importLocation.exists()) {
+            LOG.info("Could not find keycloak import file {}", importLocation);
+            return;
+        }
+
+        File file;
+        try {
+            file = importLocation.getFile();
+        } catch (IOException e) {
+            LOG.error("Could not read keycloak import file {}", importLocation, e);
+            return;
+        }
+
+        LOG.info("Starting Keycloak realm configuration import from location: {}", importLocation);
+
+        KeycloakSession session = getSessionFactory().create();
+
+        ExportImportConfig.setAction("import");
+        ExportImportConfig.setProvider(imex.getImportProvider());
+        ExportImportConfig.setFile(file.getAbsolutePath());
+
+        ExportImportManager manager = new ExportImportManager(session);
+        manager.runImport();
 
         session.close();
-    }
 
-    private void createPreConfigRealm() {
-        KeycloakSession session = getSessionFactory().create();
-
-        try {
-            session.getTransactionManager().begin();
-            RealmManager manager = new RealmManager(session);
-            Resource lessonRealmImportFile = new ClassPathResource(keycloakServerProperties.getRealmImportFile());
-
-            manager.importRealm(JsonSerialization.readValue(lessonRealmImportFile.getInputStream(), RealmRepresentation.class));
-            session.getTransactionManager().commit();
-        } catch (Exception ex) {
-            LOG.warn("Failed to import Realm json file: {}", ex.getMessage());
-            session.getTransactionManager().rollback();
-        }
-
-        session.close();
+        LOG.info("Keycloak realm configuration import finished.");
     }
 }

@@ -1,79 +1,140 @@
 package com.globant.chatbot.auth.config;
 
+import com.globant.chatbot.auth.support.DynamicJndiContextFactoryBuilder;
+import com.globant.chatbot.auth.support.KeycloakUndertowRequestFilter;
+import com.globant.chatbot.auth.support.SpringBootConfigProvider;
+import com.globant.chatbot.auth.support.SpringBootPlatform;
+import org.infinispan.configuration.parsing.ConfigurationBuilderHolder;
+import org.infinispan.configuration.parsing.ParserRegistry;
+import org.infinispan.manager.DefaultCacheManager;
 import org.jboss.resteasy.plugins.server.servlet.HttpServlet30Dispatcher;
 import org.jboss.resteasy.plugins.server.servlet.ResteasyContextParameters;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.boot.autoconfigure.web.ServerProperties;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.boot.web.servlet.ServletRegistrationBean;
+import org.springframework.context.ApplicationListener;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.io.Resource;
 
-import javax.naming.CompositeName;
-import javax.naming.InitialContext;
-import javax.naming.Name;
-import javax.naming.NameParser;
-import javax.naming.NamingException;
-import javax.naming.spi.NamingManager;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.Properties;
+import javax.servlet.Filter;
 import javax.sql.DataSource;
 
 @Configuration
 public class EmbeddedKeycloakConfig {
 
+    private static final Logger LOG = LoggerFactory.getLogger(EmbeddedKeycloakConfig.class);
+
+    @Bean
+    ApplicationListener<ApplicationReadyEvent> onApplicationReadyEventListener(ServerProperties serverProperties,
+                                                                               KeycloakCustomProperties keycloakCustomProperties) {
+        return (evt) -> {
+            Integer port = serverProperties.getPort();
+            String keycloakContextPath = keycloakCustomProperties.getContextPath();
+            LOG.info("Embedded Keycloak started: http://localhost:{}{} to use keycloak", port, keycloakContextPath);
+        };
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(name = "springBootConfigProvider")
+    protected SpringBootConfigProvider springBootConfigProvider(KeycloakProperties keycloakProperties) {
+        return new SpringBootConfigProvider(keycloakProperties);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(name = "springBootPlatform")
+    protected SpringBootPlatform springBootPlatform() {
+        return new SpringBootPlatform();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(name = "springBeansJndiContextFactory")
+    protected DynamicJndiContextFactoryBuilder springBeansJndiContextFactory(DataSource dataSource, DefaultCacheManager cacheManager) {
+        return new DynamicJndiContextFactoryBuilder(dataSource, cacheManager);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(name = "keycloakInfinispanCacheManager")
+    protected DefaultCacheManager keycloakInfinispanCacheManager(KeycloakCustomProperties customProperties) throws Exception {
+
+        KeycloakCustomProperties.Infinispan infinispan = customProperties.getInfinispan();
+        Resource configLocation = infinispan.getConfigLocation();
+        LOG.info("Using infinispan configuration from {}", configLocation.getURI());
+
+        ConfigurationBuilderHolder configBuilder = new ParserRegistry().parse(configLocation.getURL());
+        DefaultCacheManager defaultCacheManager = new DefaultCacheManager(configBuilder, false);
+        defaultCacheManager.start();
+        return defaultCacheManager;
+    }
+
     @Bean
     ServletRegistrationBean<HttpServlet30Dispatcher> keycloakJaxRsApplication(
-            KeycloakServerProperties keycloakServerProperties, DataSource dataSource) throws Exception {
+            KeycloakCustomProperties keycloakCustomProperties) throws Exception {
 
-        mockJndiEnvironment(dataSource);
-        EmbeddedKeycloakApplication.keycloakServerProperties = keycloakServerProperties;
+        initKeycloakEnvironmentFromProfiles();
 
-        ServletRegistrationBean<HttpServlet30Dispatcher> servlet = new ServletRegistrationBean<>(
-                new HttpServlet30Dispatcher());
+        ServletRegistrationBean<HttpServlet30Dispatcher> servlet = new ServletRegistrationBean<>(new HttpServlet30Dispatcher());
         servlet.addInitParameter("javax.ws.rs.Application", EmbeddedKeycloakApplication.class.getName());
-        servlet.addInitParameter(ResteasyContextParameters.RESTEASY_SERVLET_MAPPING_PREFIX,
-                keycloakServerProperties.getContextPath());
-        servlet.addInitParameter(ResteasyContextParameters.RESTEASY_USE_CONTAINER_FORM_PARAMS, "true");
-        servlet.addUrlMappings(keycloakServerProperties.getContextPath() + "/*");
-        servlet.setLoadOnStartup(1);
+
+        servlet.addInitParameter("resteasy.allowGzip", "true");
+        servlet.addInitParameter("keycloak.embedded", "true");
+        servlet.addInitParameter(ResteasyContextParameters.RESTEASY_EXPAND_ENTITY_REFERENCES, "false");
+        servlet.addInitParameter(ResteasyContextParameters.RESTEASY_SECURE_PROCESSING_FEATURE, "true");
+        servlet.addInitParameter(ResteasyContextParameters.RESTEASY_DISABLE_DTDS, "true");
+        servlet.addInitParameter(ResteasyContextParameters.RESTEASY_SERVLET_MAPPING_PREFIX, keycloakCustomProperties.getContextPath());
+        servlet.addInitParameter(ResteasyContextParameters.RESTEASY_USE_CONTAINER_FORM_PARAMS, "false");
+        servlet.addInitParameter(ResteasyContextParameters.RESTEASY_DISABLE_HTML_SANITIZER, "true");
+        servlet.addUrlMappings(keycloakCustomProperties.getContextPath() + "/*");
+
+        servlet.setLoadOnStartup(2);
         servlet.setAsyncSupported(true);
 
         return servlet;
     }
 
     @Bean
-    FilterRegistrationBean<EmbeddedKeycloakRequestFilter> keycloakSessionManagement(KeycloakServerProperties keycloakServerProperties) {
+    @ConditionalOnMissingBean(name = "keycloakSessionManagement")
+    protected FilterRegistrationBean<Filter> keycloakSessionManagement(KeycloakCustomProperties keycloakCustomProperties) {
 
-        FilterRegistrationBean<EmbeddedKeycloakRequestFilter> filter = new FilterRegistrationBean<>();
+        FilterRegistrationBean<Filter> filter = new FilterRegistrationBean<>();
         filter.setName("Keycloak Session Management");
-        filter.setFilter(new EmbeddedKeycloakRequestFilter());
-        filter.addUrlPatterns(keycloakServerProperties.getContextPath() + "/*");
+        filter.setFilter(new KeycloakUndertowRequestFilter());
+        filter.addUrlPatterns(keycloakCustomProperties.getContextPath() + "/*");
 
         return filter;
     }
 
-    private void mockJndiEnvironment(DataSource dataSource) throws NamingException {
-        NamingManager.setInitialContextFactoryBuilder((env) -> (environment) -> new InitialContext() {
+    private void initKeycloakEnvironmentFromProfiles() {
 
-            @Override
-            public Object lookup(Name name) {
-                return lookup(name.toString());
+        try (InputStream in = getClass().getClassLoader().getResourceAsStream("profile.properties")) {
+
+            if (in == null) {
+                LOG.info("Could not find profile.properties on classpath.");
+                return;
             }
 
-            @Override
-            public Object lookup(String name) {
-                if ("spring/datasource".equals(name)) {
-                    return dataSource;
+            Properties profile = new Properties();
+            profile.load(in);
+
+            LOG.info("Found profile.properties on classpath.");
+            String profilePrefix = "keycloak.profile.";
+            for (Object key : profile.keySet()) {
+                String value = (String) profile.get(key);
+                String featureName = key.toString().toLowerCase();
+                String currentValue = System.getProperty(profilePrefix + featureName);
+                if (currentValue == null) {
+                    System.setProperty(profilePrefix + featureName, value);
                 }
-                return null;
             }
-
-            @Override
-            public NameParser getNameParser(String name) {
-                return CompositeName::new;
-            }
-
-            @Override
-            public void close() {
-                // NOOP
-            }
-        });
+        } catch (IOException ioe) {
+            LOG.warn("Could not read profile.properties.", ioe);
+        }
     }
 }
