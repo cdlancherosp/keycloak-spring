@@ -46,7 +46,7 @@ public class SecurityConfig extends KeycloakWebSecurityConfigurerAdapter {
         super.configure(http);
         http.authorizeRequests()
                 .antMatchers("/api/fluentlab/dev/*")
-                .hasRole("admin-console")
+                .hasRole("USER")
                 .anyRequest()
                 .permitAll();
     }

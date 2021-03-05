@@ -1,21 +1,24 @@
 package com.globant.chatbot.auth.config;
 
 import com.globant.chatbot.auth.support.SpringBootConfigProvider;
+import org.apache.logging.log4j.util.Strings;
 import org.keycloak.Config;
-import org.keycloak.exportimport.ExportImportConfig;
 import org.keycloak.exportimport.ExportImportManager;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.KeycloakTransactionManager;
+import org.keycloak.representations.idm.RealmRepresentation;
 import org.keycloak.services.ServicesLogger;
 import org.keycloak.services.managers.ApplianceBootstrap;
+import org.keycloak.services.managers.RealmManager;
 import org.keycloak.services.resources.KeycloakApplication;
+import org.keycloak.util.JsonSerialization;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.Resource;
 import org.springframework.util.StringUtils;
 import org.springframework.web.context.support.WebApplicationContextUtils;
 
-import java.io.File;
 import java.io.IOException;
 import java.util.UUID;
 import javax.servlet.ServletContext;
@@ -90,32 +93,29 @@ public class EmbeddedKeycloakApplication extends KeycloakApplication {
 
     protected void tryImportRealm() {
 
-        KeycloakCustomProperties.Migration imex = keycloakCustomProperties.getMigration();
-        Resource importLocation = imex.getImportLocation();
+        String realmPath = keycloakCustomProperties.getImportRealmPath();
 
-        if (!importLocation.exists()) {
-            LOG.info("Could not find keycloak import file {}", importLocation);
+        if (Strings.isEmpty(realmPath)) {
+            LOG.info("Could not find keycloak import file");
             return;
         }
 
-        File file;
-        try {
-            file = importLocation.getFile();
-        } catch (IOException e) {
-            LOG.error("Could not read keycloak import file {}", importLocation, e);
-            return;
-        }
-
-        LOG.info("Starting Keycloak realm configuration import from location: {}", importLocation);
+        LOG.info("Starting Keycloak realm configuration import from location: {}", realmPath);
 
         KeycloakSession session = getSessionFactory().create();
 
-        ExportImportConfig.setAction("import");
-        ExportImportConfig.setProvider(imex.getImportProvider());
-        ExportImportConfig.setFile(file.getAbsolutePath());
+        try {
+            session.getTransactionManager().begin();
+            RealmManager manager = new RealmManager(session);
+            Resource importLocation = new ClassPathResource(realmPath);
 
-        ExportImportManager manager = new ExportImportManager(session);
-        manager.runImport();
+            manager.importRealm(JsonSerialization.readValue(importLocation.getInputStream(), RealmRepresentation.class));
+            session.getTransactionManager().commit();
+        } catch (IOException ex) {
+            LOG.warn("Failed to import Realm json file: {}", ex.getMessage());
+            session.getTransactionManager().rollback();
+            return;
+        }
 
         session.close();
 
