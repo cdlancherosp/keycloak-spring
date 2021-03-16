@@ -8,7 +8,7 @@ import org.springframework.core.io.Resource;
 @ConfigurationProperties(prefix = "keycloak.custom")
 public class KeycloakCustomProperties {
 
-    private String contextPath = "/auth";
+    private String contextPath = "/keycloak/auth";
     private AdminUser adminUser = new AdminUser();
     private Infinispan infinispan = new Infinispan();
     private String importRealmPath = Strings.EMPTY;

@@ -4,6 +4,7 @@ import com.globant.chatbot.auth.support.DynamicJndiContextFactoryBuilder;
 import com.globant.chatbot.auth.support.KeycloakUndertowRequestFilter;
 import com.globant.chatbot.auth.support.SpringBootConfigProvider;
 import com.globant.chatbot.auth.support.SpringBootPlatform;
+import liquibase.integration.spring.SpringLiquibase;
 import org.infinispan.configuration.parsing.ConfigurationBuilderHolder;
 import org.infinispan.configuration.parsing.ParserRegistry;
 import org.infinispan.manager.DefaultCacheManager;
@@ -14,6 +15,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.web.ServerProperties;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.boot.web.servlet.ServletRegistrationBean;
 import org.springframework.context.ApplicationListener;
@@ -21,16 +23,21 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.Resource;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.util.Properties;
 import javax.servlet.Filter;
 import javax.sql.DataSource;
 
 @Configuration
+@EnableConfigurationProperties({ KeycloakProperties.class, KeycloakCustomProperties.class })
 public class EmbeddedKeycloakConfig {
 
     private static final Logger LOG = LoggerFactory.getLogger(EmbeddedKeycloakConfig.class);
+
+    @Bean
+    public SpringLiquibase liquibase() {
+        SpringLiquibase liquibase = new SpringLiquibase();
+        liquibase.setShouldRun(false);
+        return liquibase;
+    }
 
     @Bean
     ApplicationListener<ApplicationReadyEvent> onApplicationReadyEventListener(ServerProperties serverProperties,
@@ -78,8 +85,6 @@ public class EmbeddedKeycloakConfig {
     ServletRegistrationBean<HttpServlet30Dispatcher> keycloakJaxRsApplication(
             KeycloakCustomProperties keycloakCustomProperties) throws Exception {
 
-        initKeycloakEnvironmentFromProfiles();
-
         ServletRegistrationBean<HttpServlet30Dispatcher> servlet = new ServletRegistrationBean<>(new HttpServlet30Dispatcher());
         servlet.addInitParameter("javax.ws.rs.Application", EmbeddedKeycloakApplication.class.getName());
 
@@ -93,7 +98,7 @@ public class EmbeddedKeycloakConfig {
         servlet.addInitParameter(ResteasyContextParameters.RESTEASY_DISABLE_HTML_SANITIZER, "true");
         servlet.addUrlMappings(keycloakCustomProperties.getContextPath() + "/*");
 
-        servlet.setLoadOnStartup(2);
+        servlet.setLoadOnStartup(1);
         servlet.setAsyncSupported(true);
 
         return servlet;
@@ -109,32 +114,5 @@ public class EmbeddedKeycloakConfig {
         filter.addUrlPatterns(keycloakCustomProperties.getContextPath() + "/*");
 
         return filter;
-    }
-
-    private void initKeycloakEnvironmentFromProfiles() {
-
-        try (InputStream in = getClass().getClassLoader().getResourceAsStream("profile.properties")) {
-
-            if (in == null) {
-                LOG.info("Could not find profile.properties on classpath.");
-                return;
-            }
-
-            Properties profile = new Properties();
-            profile.load(in);
-
-            LOG.info("Found profile.properties on classpath.");
-            String profilePrefix = "keycloak.profile.";
-            for (Object key : profile.keySet()) {
-                String value = (String) profile.get(key);
-                String featureName = key.toString().toLowerCase();
-                String currentValue = System.getProperty(profilePrefix + featureName);
-                if (currentValue == null) {
-                    System.setProperty(profilePrefix + featureName, value);
-                }
-            }
-        } catch (IOException ioe) {
-            LOG.warn("Could not read profile.properties.", ioe);
-        }
     }
 }
